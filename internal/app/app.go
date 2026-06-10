@@ -257,10 +257,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() string {
-	headerWidth := maxInt(20, m.contentWidth())
-	header := lipgloss.NewStyle().Width(headerWidth).MaxWidth(headerWidth).Render(
-		titleStyle.Render("ducklog") + "  " + hintStyle.Render(fmt.Sprintf("DB: %s  Model: %s  Mode: Safe", m.currentDBPath(), m.cfg.OpenRouterModel)),
-	)
+	header := titleStyle.Render("ducklog") + "  " + hintStyle.Render(fmt.Sprintf("DB: %s  Model: %s  Safe", compactValue(m.currentDBPath(), 24), compactValue(m.cfg.OpenRouterModel, 28)))
 	body := lipgloss.JoinHorizontal(lipgloss.Top, m.sidebar(), m.mainPanel())
 
 	footer := m.status
@@ -560,4 +557,15 @@ func wrapText(value string, width int) string {
 		wrapped = append(wrapped, line)
 	}
 	return strings.Join(wrapped, "\n")
+}
+
+func compactValue(value string, maxWidth int) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= maxWidth {
+		return value
+	}
+	if maxWidth <= 3 {
+		return value[:maxWidth]
+	}
+	return value[:maxWidth-3] + "..."
 }
