@@ -36,8 +36,6 @@ func Ask(ctx context.Context, cfg config.Config, opts Options) (*Result, error) 
 		BaseURL:     cfg.OpenRouterURL,
 		Model:       cfg.OpenRouterModel,
 		Temperature: cfg.Temperature,
-		HTTPReferer: cfg.HTTPReferer,
-		AppTitle:    cfg.AppTitle,
 	}
 
 	plan, err := ai.GenerateSQLPlan(ctx, client, opts.Prompt)

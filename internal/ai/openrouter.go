@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -15,20 +16,28 @@ type OpenRouterClient struct {
 	BaseURL     string
 	Model       string
 	Temperature float64
-	HTTPReferer string
-	AppTitle    string
 	HTTP        *http.Client
 }
 
 func (c *OpenRouterClient) Chat(ctx context.Context, messages []ChatMessage) (string, error) {
-	if c.APIKey == "" {
+	return c.chat(ctx, messages, nil)
+}
+
+func (c *OpenRouterClient) ChatJSON(ctx context.Context, messages []ChatMessage) (string, error) {
+	return c.chat(ctx, messages, &ResponseFormat{Type: "json_object"})
+}
+
+func (c *OpenRouterClient) chat(ctx context.Context, messages []ChatMessage, responseFormat *ResponseFormat) (string, error) {
+	apiKey := strings.TrimSpace(strings.TrimPrefix(c.APIKey, "Bearer "))
+	if apiKey == "" || isPlaceholderAPIKey(apiKey) {
 		return "", fmt.Errorf("OPENROUTER_API_KEY is required")
 	}
 
 	body := ChatRequest{
-		Model:       c.Model,
-		Messages:    messages,
-		Temperature: c.Temperature,
+		Model:          c.Model,
+		Messages:       messages,
+		Temperature:    c.Temperature,
+		ResponseFormat: responseFormat,
 	}
 
 	b, err := json.Marshal(body)
@@ -41,14 +50,8 @@ func (c *OpenRouterClient) Chat(ctx context.Context, messages []ChatMessage) (st
 		return "", err
 	}
 
-	req.Header.Set("Authorization", "Bearer "+c.APIKey)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
-	if c.HTTPReferer != "" {
-		req.Header.Set("HTTP-Referer", c.HTTPReferer)
-	}
-	if c.AppTitle != "" {
-		req.Header.Set("X-Title", c.AppTitle)
-	}
 
 	httpClient := c.HTTP
 	if httpClient == nil {
@@ -67,6 +70,9 @@ func (c *OpenRouterClient) Chat(ctx context.Context, messages []ChatMessage) (st
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if resp.StatusCode == http.StatusUnauthorized {
+			return "", fmt.Errorf("OpenRouter authentication failed (401). Check OPENROUTER_API_KEY in your environment or .env")
+		}
 		return "", fmt.Errorf("openrouter error: %s", string(respBody))
 	}
 
@@ -79,4 +85,12 @@ func (c *OpenRouterClient) Chat(ctx context.Context, messages []ChatMessage) (st
 	}
 
 	return chatResp.Choices[0].Message.Content, nil
+}
+
+func isPlaceholderAPIKey(value string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	return normalized == "..." ||
+		normalized == "your_api_key_here" ||
+		normalized == "replace_me" ||
+		normalized == "changeme"
 }

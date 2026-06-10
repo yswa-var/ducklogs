@@ -3,16 +3,25 @@ package app
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"ducklogs/internal/config"
 	"ducklogs/internal/ducklogai"
 	"ducklogs/internal/logs"
-	"ducklogs/internal/report"
 
 	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
+)
+
+const (
+	defaultWidth  = 120
+	defaultHeight = 34
+	sidebarWidth  = 18
+	minPanelWidth = 54
 )
 
 const (
@@ -53,6 +62,8 @@ type model struct {
 	cfg          config.Config
 	screen       int
 	focusIndex   int
+	width        int
+	height       int
 	submitting   bool
 	askFields    []field
 	ingestFields []field
@@ -62,6 +73,7 @@ type model struct {
 	sqlPreview   string
 	resultText   string
 	reportPath   string
+	reportView   viewport.Model
 }
 
 var (
@@ -75,7 +87,7 @@ var (
 )
 
 func Run() error {
-	program := tea.NewProgram(newModel())
+	program := tea.NewProgram(newModel(), tea.WithAltScreen())
 	_, err := program.Run()
 	return err
 }
@@ -100,8 +112,12 @@ func newModel() model {
 		screen:       screenAsk,
 		askFields:    askFields,
 		ingestFields: ingestFields,
+		width:        defaultWidth,
+		height:       defaultHeight,
+		reportView:   viewport.New(78, 10),
 		status:       "Ask a logs question, preview SQL, run it, and write a Markdown report.",
 	}
+	m.resizeFields()
 	m.syncFocus()
 	return m
 }
@@ -137,6 +153,12 @@ func (m model) Init() tea.Cmd {
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		m.resizeFields()
+		return m, nil
+
 	case tea.KeyMsg:
 		if m.submitting {
 			switch msg.String() {
@@ -169,6 +191,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "ctrl+s":
 			return m.submit()
+		case "pgup", "pgdown":
+			if m.screen == screenAsk && m.reportView.TotalLineCount() > 0 {
+				var cmd tea.Cmd
+				m.reportView, cmd = m.reportView.Update(msg)
+				return m, cmd
+			}
 		}
 
 	case ingestCompleteMsg:
@@ -188,7 +216,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.submitting = false
 		if msg.err != nil {
 			m.errMessage = msg.err.Error()
-			m.status = "Ask failed. Check your API key, database path, or generated SQL."
+			m.status = "Ask failed. Check OPENROUTER_API_KEY, the database path, or the generated SQL."
 			return m, nil
 		}
 
@@ -202,9 +230,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if msg.result.Rows != nil {
-			m.resultText = fmt.Sprintf("Rows: %d\n\n%s", msg.result.Rows.RowCount, report.MarkdownTable(msg.result.Rows, m.cfg.MaxRowsForReport))
+			m.resultText = fmt.Sprintf("%d rows", msg.result.Rows.RowCount)
 		}
 		if msg.result.ReportPath != "" {
+			if err := m.loadReportPreview(msg.result.ReportPath); err != nil {
+				m.errMessage = err.Error()
+				m.status = "Report was written, but preview rendering failed."
+				return m, nil
+			}
 			m.status = fmt.Sprintf("Report written to %s", msg.result.ReportPath)
 		} else {
 			m.status = "SQL generated and query completed."
@@ -224,7 +257,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() string {
-	header := titleStyle.Render("ducklog") + "  " + hintStyle.Render(fmt.Sprintf("DB: %s  Model: %s  Mode: Safe", m.currentDBPath(), m.cfg.OpenRouterModel))
+	headerWidth := maxInt(20, m.contentWidth())
+	header := lipgloss.NewStyle().Width(headerWidth).MaxWidth(headerWidth).Render(
+		titleStyle.Render("ducklog") + "  " + hintStyle.Render(fmt.Sprintf("DB: %s  Model: %s  Mode: Safe", m.currentDBPath(), m.cfg.OpenRouterModel)),
+	)
 	body := lipgloss.JoinHorizontal(lipgloss.Top, m.sidebar(), m.mainPanel())
 
 	footer := m.status
@@ -244,9 +280,9 @@ func (m model) View() string {
 		sections = append(sections, okStyle.Render("Report: "+m.reportPath))
 	}
 	sections = append(sections, hintStyle.Render(footer))
-	sections = append(sections, hintStyle.Render("1 Ask AI  2 Ingest Logs  Tab/Shift+Tab move  Enter continue  Ctrl+S run  Q quit"))
+	sections = append(sections, hintStyle.Render("1 Ask AI  2 Ingest Logs  Tab/Shift+Tab move  Enter/Ctrl+S run  PgUp/PgDn scroll report  Q quit"))
 
-	return lipgloss.NewStyle().Padding(1, 2).Render(strings.Join(sections, "\n\n"))
+	return lipgloss.NewStyle().Padding(1, 2).Width(m.contentWidth() + 4).Render(strings.Join(sections, "\n\n"))
 }
 
 func (m model) sidebar() string {
@@ -260,23 +296,27 @@ func (m model) sidebar() string {
 		ingest = "> Ingest Logs"
 	}
 	items = append(items, ask, ingest, "  Saved SQL", "  Reports", "  Settings")
-	return sidebarStyle.Width(18).Render(strings.Join(items, "\n"))
+	return sidebarStyle.Width(sidebarWidth).Height(m.panelHeight()).Render(strings.Join(items, "\n"))
 }
 
 func (m model) mainPanel() string {
+	panelWidth := m.panelWidth()
 	if m.screen == screenIngest {
-		return panelStyle.Width(86).Render(m.renderFields("INGEST", *m.fields()))
+		return panelStyle.Width(panelWidth).Height(m.panelHeight()).Render(m.renderFields("INGEST", *m.fields()))
 	}
 
 	var sections []string
 	sections = append(sections, m.renderFields("ASK", *m.fields()))
 	if m.sqlPreview != "" {
-		sections = append(sections, labelStyle.Render("Generated SQL")+"\n"+m.sqlPreview)
+		sections = append(sections, labelStyle.Render("Generated SQL")+"\n"+wrapText(m.sqlPreview, maxInt(20, panelWidth-4)))
 	}
 	if m.resultText != "" {
 		sections = append(sections, labelStyle.Render("Results")+"\n"+m.resultText)
 	}
-	return panelStyle.Width(86).Render(strings.Join(sections, "\n\n"))
+	if m.reportView.TotalLineCount() > 0 {
+		sections = append(sections, labelStyle.Render("Report Preview")+"\n"+m.reportView.View())
+	}
+	return panelStyle.Width(panelWidth).Height(m.panelHeight()).Render(strings.Join(sections, "\n\n"))
 }
 
 func (m model) renderFields(title string, fields []field) string {
@@ -364,6 +404,7 @@ func (m model) submitAsk() (tea.Model, tea.Cmd) {
 	m.sqlPreview = ""
 	m.resultText = ""
 	m.reportPath = ""
+	m.reportView.SetContent("")
 	m.status = "Generating SQL, running DuckDB, and preparing report..."
 
 	return m, askCmd(cfg, ducklogai.Options{
@@ -433,4 +474,90 @@ func ingestCmd(query logs.Query) tea.Cmd {
 			err:    err,
 		}
 	}
+}
+
+func (m *model) resizeFields() {
+	inputWidth := maxInt(20, m.panelWidth()-8)
+	for i := range m.askFields {
+		m.askFields[i].input.Width = inputWidth
+	}
+	for i := range m.ingestFields {
+		m.ingestFields[i].input.Width = inputWidth
+	}
+
+	m.reportView.Width = maxInt(20, m.panelWidth()-6)
+	m.reportView.Height = maxInt(4, m.reportHeight())
+}
+
+func (m *model) loadReportPreview(path string) error {
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read report preview: %w", err)
+	}
+
+	width := maxInt(20, m.reportView.Width)
+	renderer, err := glamour.NewTermRenderer(
+		glamour.WithAutoStyle(),
+		glamour.WithWordWrap(width),
+	)
+	if err != nil {
+		return fmt.Errorf("render report preview: %w", err)
+	}
+	rendered, err := renderer.Render(string(contents))
+	if err != nil {
+		return fmt.Errorf("render report preview: %w", err)
+	}
+
+	m.reportView.SetContent(rendered)
+	m.reportView.GotoTop()
+	return nil
+}
+
+func (m model) contentWidth() int {
+	if m.width <= 0 {
+		return defaultWidth - 4
+	}
+	return maxInt(70, m.width-4)
+}
+
+func (m model) panelWidth() int {
+	return maxInt(minPanelWidth, m.contentWidth()-sidebarWidth-4)
+}
+
+func (m model) panelHeight() int {
+	if m.height <= 0 {
+		return defaultHeight - 10
+	}
+	return maxInt(14, m.height-10)
+}
+
+func (m model) reportHeight() int {
+	base := m.panelHeight() - 18
+	if m.sqlPreview == "" {
+		base += 3
+	}
+	return maxInt(4, base)
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func wrapText(value string, width int) string {
+	if width <= 0 {
+		return value
+	}
+
+	var wrapped []string
+	for _, line := range strings.Split(value, "\n") {
+		for len(line) > width {
+			wrapped = append(wrapped, line[:width])
+			line = line[width:]
+		}
+		wrapped = append(wrapped, line)
+	}
+	return strings.Join(wrapped, "\n")
 }

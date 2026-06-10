@@ -1,8 +1,10 @@
 package config
 
 import (
+	"bufio"
 	"os"
 	"strconv"
+	"strings"
 )
 
 const (
@@ -22,26 +24,59 @@ type Config struct {
 	Temperature      float64
 	MaxRowsForReport int
 	ReportPath       string
-	HTTPReferer      string
-	AppTitle         string
 }
 
 func Load() Config {
+	loadDotEnv(".env")
+
 	return Config{
 		Database:         envString("DUCKLOG_DATABASE", DefaultDatabase),
-		OpenRouterAPIKey: os.Getenv("OPENROUTER_API_KEY"),
+		OpenRouterAPIKey: normalizeAPIKey(os.Getenv("OPENROUTER_API_KEY")),
 		OpenRouterURL:    envString("OPENROUTER_BASE_URL", DefaultOpenRouterURL),
 		OpenRouterModel:  envString("OPENROUTER_MODEL", DefaultOpenRouterModel),
 		Temperature:      envFloat("OPENROUTER_TEMPERATURE", DefaultTemperature),
 		MaxRowsForReport: envInt("DUCKLOG_MAX_ROWS_FOR_REPORT", DefaultMaxRowsForReport),
 		ReportPath:       envString("DUCKLOG_REPORT_PATH", DefaultReportPath),
-		HTTPReferer:      envString("OPENROUTER_HTTP_REFERER", "https://github.com/yourname/ducklog"),
-		AppTitle:         envString("OPENROUTER_APP_TITLE", "ducklog"),
 	}
 }
 
+func loadDotEnv(path string) {
+	file, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+
+		key = strings.TrimSpace(key)
+		value = strings.Trim(strings.TrimSpace(value), `"'`)
+		if key == "" {
+			continue
+		}
+
+		_ = os.Setenv(key, value)
+	}
+}
+
+func normalizeAPIKey(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.TrimPrefix(value, "Bearer ")
+	return strings.TrimSpace(value)
+}
+
 func envString(key, fallback string) string {
-	value := os.Getenv(key)
+	value := strings.TrimSpace(os.Getenv(key))
 	if value == "" {
 		return fallback
 	}

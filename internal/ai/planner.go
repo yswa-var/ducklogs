@@ -4,13 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"ducklogs/internal/sqlsafe"
 )
 
+var sqlFenceRe = regexp.MustCompile("(?is)```sql\\s*(.*?)\\s*```")
+
 func GenerateSQLPlan(ctx context.Context, client *OpenRouterClient, userPrompt string) (*SQLPlan, error) {
-	content, err := client.Chat(ctx, []ChatMessage{
+	content, err := client.ChatJSON(ctx, []ChatMessage{
 		{Role: "system", Content: SQLSystemPrompt},
 		{Role: "user", Content: userPrompt},
 	})
@@ -52,16 +55,89 @@ Return the same JSON shape.`, userPrompt, badSQL, duckErr.Error())
 }
 
 func parseSQLPlan(content string) (*SQLPlan, error) {
+	clean := stripMarkdownFence(strings.TrimSpace(content))
+
+	var plan SQLPlan
+	if err := json.Unmarshal([]byte(clean), &plan); err == nil {
+		return &plan, nil
+	}
+
+	if jsonBlock, ok := extractJSONObject(content); ok {
+		if err := json.Unmarshal([]byte(jsonBlock), &plan); err == nil {
+			return &plan, nil
+		}
+	}
+
+	if sql, ok := extractSQLFence(content); ok {
+		return &SQLPlan{
+			NeedsClarification: false,
+			Intent:             "log_analysis_query",
+			SQL:                sql,
+			Explanation:        "Generated from the SQL block returned by the model.",
+			ReportTitle:        "DuckLog Query Results",
+			ColumnsExpected:    []string{},
+		}, nil
+	}
+
+	return nil, fmt.Errorf("failed to parse AI response as SQLPlan JSON\nraw: %s", content)
+}
+
+func stripMarkdownFence(content string) string {
 	clean := strings.TrimSpace(content)
 	clean = strings.TrimPrefix(clean, "```json")
 	clean = strings.TrimPrefix(clean, "```")
 	clean = strings.TrimSuffix(clean, "```")
-	clean = strings.TrimSpace(clean)
+	return strings.TrimSpace(clean)
+}
 
-	var plan SQLPlan
-	if err := json.Unmarshal([]byte(clean), &plan); err != nil {
-		return nil, fmt.Errorf("failed to parse AI JSON: %w\nraw: %s", err, content)
+func extractSQLFence(content string) (string, bool) {
+	matches := sqlFenceRe.FindStringSubmatch(content)
+	if matches == nil {
+		return "", false
+	}
+	sql := strings.TrimSpace(matches[1])
+	if sql == "" {
+		return "", false
+	}
+	return sql, true
+}
+
+func extractJSONObject(content string) (string, bool) {
+	start := strings.Index(content, "{")
+	if start == -1 {
+		return "", false
 	}
 
-	return &plan, nil
+	depth := 0
+	inString := false
+	escaped := false
+	for i := start; i < len(content); i++ {
+		ch := content[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if ch == '\\' && inString {
+			escaped = true
+			continue
+		}
+		if ch == '"' {
+			inString = !inString
+			continue
+		}
+		if inString {
+			continue
+		}
+		switch ch {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return content[start : i+1], true
+			}
+		}
+	}
+
+	return "", false
 }
