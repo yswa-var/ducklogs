@@ -10,6 +10,11 @@ It can:
 - Preview the generated SQL before trusting the answer.
 - Write Markdown reports with the prompt, SQL, row count, result table, AI summary, and limitations.
 
+<p align="center">
+  <img src="image.png" width="45%" />
+  <img src="image-1.png" width="45%" />
+</p>
+
 ## Requirements
 
 - Go 1.26+
